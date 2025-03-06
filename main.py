@@ -17,6 +17,7 @@ from transformers import AutoTokenizer, AutoModel
 import torch
 import requests
 from io import BytesIO
+import keras
 
 # Initialize FastAPI
 app = FastAPI()
@@ -34,7 +35,7 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 tokenizer = AutoTokenizer.from_pretrained("yiyanghkust/finbert-tone")
 finbert = AutoModel.from_pretrained("yiyanghkust/finbert-tone")
 
-def fetch_stock_data(symbol: str, years: int = 5) -> pd.DataFrame:
+def fetch_stock_data(symbol: str, years: int = 10) -> pd.DataFrame:
     """Fetch historical stock data with dynamic end date"""
     end_date = datetime.today().strftime('%Y-%m-%d')
     start_date = (datetime.today() - timedelta(days=years*365)).strftime('%Y-%m-%d')
@@ -45,6 +46,7 @@ def fetch_stock_data(symbol: str, years: int = 5) -> pd.DataFrame:
             raise ValueError(f"No data found for {symbol}")
             
         df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+        
         return df.reset_index()
     except Exception as e:
         logging.error(f"Error fetching data: {str(e)}")
@@ -52,28 +54,51 @@ def fetch_stock_data(symbol: str, years: int = 5) -> pd.DataFrame:
 
 def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add comprehensive technical indicators"""
-    df['SMA_20'] = ta.trend.sma_indicator(df['Close'], 20)
-    df['SMA_50'] = ta.trend.sma_indicator(df['Close'], 50)
-    df['EMA_20'] = ta.trend.ema_indicator(df['Close'], 20)
-    df['RSI_14'] = ta.momentum.rsi(df['Close'], 14)
-    
+    print("adding indicators")
+    df.columns = df.columns.droplevel(1)
+    print("df columns:", df.columns)
+    print("df shape:", df.shape)
+    df['Close'] = df['Close'].astype(float)
+    print('df[Close]: ', df['Close'])
+
+    # Simple Moving Averages
+    df['SMA_20'] = ta.trend.sma_indicator(df['Close'], window=20)
+    print('df[SMA_20]: ', df['SMA_20'])
+    df['SMA_50'] = ta.trend.sma_indicator(df['Close'], window=50)
+
+    # Exponential Moving Average
+    df['EMA_20'] = ta.trend.ema_indicator(df['Close'], window=20)
+
+    # Relative Strength Index
+    df['RSI_14'] = ta.momentum.rsi(df['Close'], window=14)
+
+    # MACD
     macd = ta.trend.MACD(df['Close'])
-    df['MACD'] = macd.macd()
+    df['MACD'] = macd.macd()  # Ensure it's a 1D Series
     df['MACD_Signal'] = macd.macd_signal()
-    
+
+    # Bollinger Bands
     bb = ta.volatility.BollingerBands(df['Close'])
     df['BB_high'] = bb.bollinger_hband()
     df['BB_low'] = bb.bollinger_lband()
-    
+
+    # Average True Range
     df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'])
-    
+
+    # On-Balance Volume (Ensure 'Volume' is float)
+    df['Volume'] = df['Volume'].astype(float)
     df['OBV'] = ta.volume.on_balance_volume(df['Close'], df['Volume'])
-    
-    stoch = ta.momentum.StochasticOscillator(df['High'], df['Low'], df['Close'], 14)
+
+    # Stochastic Oscillator
+    stoch = ta.momentum.StochasticOscillator(df['High'], df['Low'], df['Close'], window=14)
     df['Stoch_%K'] = stoch.stoch()
     df['Stoch_%D'] = stoch.stoch_signal()
-    
-    return df.dropna()
+
+    # Drop NaN values (some indicators return NaN for first few rows)
+    df = df.dropna()
+    print('df: ', df)
+
+    return df
 
 def create_sequences(data: np.ndarray, targets: np.ndarray, seq_length: int) -> tuple:
     """Create time sequences for LSTM training"""
@@ -94,9 +119,12 @@ def get_finbert_sentiment(text: str) -> float:
 async def train_model(symbol: str, test_size: float = 0.2):
     try:
         df = fetch_stock_data(symbol)
+        print('df:---------------------------- ', df)
         df = add_technical_indicators(df)
-        
+        print('df: ', df)
+
         features = df[DATA_COLUMNS]
+        print('features: ', features)
         target = df['Close'].values.reshape(-1, 1)
         
         split_idx = int(len(features) * (1 - test_size))
@@ -133,11 +161,11 @@ async def train_model(symbol: str, test_size: float = 0.2):
         
         X_seq, y_seq = create_sequences(X_train_scaled, y_train_scaled, SEQ_LENGTH)
         lstm_model = Sequential([
-            Bidirectional(LSTM(128, return_sequences=True, input_shape=(SEQ_LENGTH, len(DATA_COLUMNS))),
+            Bidirectional(LSTM(128, return_sequences=True, input_shape=(SEQ_LENGTH, len(DATA_COLUMNS)))),
             Dropout(0.3),
             LSTM(64),
             Dense(32, activation='relu'),
-            Dense(1))
+            Dense(1)
         ])
         
         lstm_model.compile(optimizer='adam', loss='mse')
@@ -167,32 +195,41 @@ async def predict(symbol: str, days: int = 1):
     try:
         df = fetch_stock_data(symbol)
         df = add_technical_indicators(df)
+        print('df: ', df)
         
         feature_scaler = joblib.load(f"{MODEL_DIR}/feature_scaler_{symbol}.pkl")
+        print('MODEL_DIR: ', MODEL_DIR)
+        print('feature_scaler: ', feature_scaler)
         target_scaler = joblib.load(f"{MODEL_DIR}/target_scaler_{symbol}.pkl")
         xgb_model = joblib.load(f"{MODEL_DIR}/xgb_{symbol}.pkl")
-        lstm_model = load_model(f"{MODEL_DIR}/lstm_{symbol}.h5")
+        lstm_model = load_model(f"{MODEL_DIR}/lstm_{symbol}.h5", custom_objects={'mse':keras.losses.MeanSquaredError()})
+        print('lstm_model: ', lstm_model)
         
         latest_data = feature_scaler.transform(df[DATA_COLUMNS].iloc[-SEQ_LENGTH:])
         
         xgb_pred = xgb_model.predict(latest_data[-1].reshape(1, -1))[0]
+        print('xgb_pred: ', xgb_pred)
         
         lstm_input = latest_data.reshape(1, SEQ_LENGTH, len(DATA_COLUMNS))
+        print('lstm_input: ', lstm_input)
         lstm_pred_scaled = lstm_model.predict(lstm_input)[0][0]
+        print('lstm_pred_scaled: ', lstm_pred_scaled)
         lstm_pred = target_scaler.inverse_transform([[lstm_pred_scaled]])[0][0]
+        print('lstm_pred: ', lstm_pred)
         
         news = requests.get(f"https://newsapi.org/v2/everything?q={symbol}&apiKey=YOUR_KEY").json()
         sentiment_scores = [get_finbert_sentiment(article['title']) for article in news.get('articles', [])[:5]]
         avg_sentiment = np.mean(sentiment_scores) if sentiment_scores else 0
         
         final_pred = (0.6 * lstm_pred + 0.4 * xgb_pred) * (1 + 0.1 * avg_sentiment)
+        print('final_pred: ', final_pred)
         
         return {
-            "symbol": symbol,
-            "lstm_prediction": lstm_pred,
-            "xgb_prediction": xgb_pred,
-            "sentiment_impact": avg_sentiment,
-            "final_prediction": final_pred
+            "symbol": float(symbol),
+            "lstm_prediction": float(lstm_pred),
+            "xgb_prediction": float(xgb_pred),
+            "sentiment_impact": float(avg_sentiment),
+            "final_prediction": float(final_pred)
         }
         
     except Exception as e:
