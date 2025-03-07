@@ -4,6 +4,30 @@ import pandas as pd
 import plotly.graph_objects as go
 import yfinance as yf
 
+
+st.markdown(
+    """
+    <style>
+        body {
+            background-color: #121212;
+            color: white;
+        }
+        .stTextInput, .stTextArea, .stSelectbox, .stNumberInput, .stSlider {
+            background-color: #333;
+            color: white;
+        }
+        .stButton>button {
+            background-color: #ff0000;
+            color: white;
+        }
+        h1 {
+            color: #1E90FF;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 st.title("📈 Live Stock Predictions with Buy/Sell Signals")
 
 symbol = st.text_input("Enter Stock Symbol (e.g., RELIANCE.NS):", "RELIANCE.NS")
@@ -38,12 +62,19 @@ predictions = get_predictions(symbol)
 sentiment = get_sentiment(symbol)
 
 
-df["Signal"] = df["Close"].diff().apply(lambda x: "BUY" if x > 0 else "SELL")
+df["Signal"] = df["Close"].diff().fillna(0).map(lambda x: "BUY" if x > 0 else "SELL")
 
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="Actual Price"))
-fig.add_trace(go.Scatter(x=df.index[-1:], y=[predictions.get("xgb", 0)], mode="markers", marker=dict(color="red", size=10), name="XGB Prediction"))
-fig.add_trace(go.Scatter(x=df.index[-1:], y=[predictions.get("lstm", 0)], mode="markers", marker=dict(color="blue", size=10), name="LSTM Prediction"))
+fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="Actual Price", line=dict(color="#00FFFF")))
+fig.add_trace(go.Scatter(x=[df.index[-1]], y=[predictions.get("xgb", 0)], mode="markers", marker=dict(color="#FF0000", size=10), name="XGB Prediction"))
+fig.add_trace(go.Scatter(x=[df.index[-1]], y=[predictions.get("lstm", 0)], mode="markers", marker=dict(color="#1E90FF", size=10), name="LSTM Prediction"))
+
+fig.update_layout(
+    template="plotly_dark",
+    paper_bgcolor="#121212",
+    plot_bgcolor="#121212",
+    font=dict(color="white")
+)
 
 st.plotly_chart(fig)
 
